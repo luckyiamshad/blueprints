@@ -1,0 +1,288 @@
+blueprint:
+  name: "Switchboard Multi-Function Button Control"
+  description: "Control multiple lights with different button press patterns and long press for dimming the most recently used lights"
+  domain: automation
+  source_url: https://github.com/yourusername/homeassistant-blueprints
+  version: 1.0.0
+  homeassistant:
+    min_version: 2025.4.0
+  input:
+    button_entity:
+      name: Button Entity
+      description: "The button entity to use for control"
+      selector:
+        entity:
+          domain: binary_sensor
+    single_press_lights:
+      name: Single Press Lights
+      description: "Lights to toggle with a single press"
+      selector:
+        target:
+          entity:
+            domain: light
+    double_press_lights:
+      name: Double Press Lights
+      description: "Lights to toggle with a double press"
+      selector:
+        target:
+          entity:
+            domain: light
+    triple_press_all_lights:
+      name: All House Lights
+      description: "All lights in the house to turn on with triple press"
+      selector:
+        target:
+          entity:
+            domain: light
+    last_controlled_lights_var:
+      name: Last Controlled Lights Variable
+      description: "VAR entity that stores the last controlled lights (must be the same for all button automations)"
+      default: var.last_controlled_lights
+      selector:
+        entity:
+          domain: var
+    dimming_step:
+      name: Dimming Step
+      description: "Step size for dimming (1-255)"
+      default: 25
+      selector:
+        number:
+          min: 1
+          max: 255
+          step: 1
+    double_press_time:
+      name: Double Press Time
+      description: "Maximum time between presses for double press (seconds)"
+      default: 0.5
+      selector:
+        number:
+          min: 0.1
+          max: 2.0
+          step: 0.1
+          unit_of_measurement: seconds
+    triple_press_time:
+      name: Triple Press Time
+      description: "Maximum time between presses for triple press (seconds)"
+      default: 0.5
+      selector:
+        number:
+          min: 0.1
+          max: 2.0
+          step: 0.1
+          unit_of_measurement: seconds
+    long_press_time:
+      name: Long Press Time
+      description: "Time to hold for long press (seconds)"
+      default: 1.0
+      selector:
+        number:
+          min: 0.5
+          max: 5.0
+          step: 0.1
+          unit_of_measurement: seconds
+
+variables:
+  button_entity: !input button_entity
+  double_press_time: !input double_press_time
+  triple_press_time: !input triple_press_time
+  long_press_time: !input long_press_time
+
+trigger:
+  # Trigger when button is pressed
+  - platform: state
+    entity_id: !input button_entity
+    to: "on"
+    id: "button_pressed"
+  
+  # Trigger when button is released
+  - platform: state
+    entity_id: !input button_entity
+    to: "off"
+    id: "button_released"
+  
+  # Timer for double press
+  - platform: event
+    event_type: timer.finished
+    event_data:
+      entity_id: timer.button_double_press_timer
+    id: "double_press_timer"
+  
+  # Timer for triple press
+  - platform: event
+    event_type: timer.finished
+    event_data:
+      entity_id: timer.button_triple_press_timer
+    id: "triple_press_timer"
+  
+  # Timer for long press
+  - platform: event
+    event_type: timer.finished
+    event_data:
+      entity_id: timer.button_long_press_timer
+    id: "long_press_timer"
+    
+  # Track var entity changes
+  - platform: state
+    entity_id: var.button_press_count
+    id: "press_count_changed"
+    
+  - platform: state
+    entity_id: var.dimming_direction
+    id: "dimming_direction_changed"
+    
+  - platform: state
+    entity_id: var.long_press_active
+    id: "long_press_state_changed"
+
+action:
+  - choose:
+      # Button pressed action
+      - conditions:
+          - condition: trigger
+            id: button_pressed
+        sequence:
+          - service: timer.start
+            target:
+              entity_id: timer.button_long_press_timer
+            data:
+              duration: "{{ long_press_time }}"
+          - service: var.set
+            data:
+              entity_id: var.button_press_count
+              value: "{{ (states('var.button_press_count') | int) + 1 }}"
+              attributes:
+                last_press_time: "{{ now() }}"
+      
+      # Button released action
+      - conditions:
+          - condition: trigger
+            id: button_released
+        sequence:
+          - service: timer.cancel
+            target:
+              entity_id: timer.button_long_press_timer
+          - if:
+              condition: state
+              entity_id: var.long_press_active
+              state: "true"
+            then:
+              - service: var.set
+                data:
+                  entity_id: var.long_press_active
+                  value: "false"
+            else:
+              - if:
+                  condition: template
+                  value_template: "{{ states('var.button_press_count') | int == 1 }}"
+                then:
+                  - service: timer.start
+                    target:
+                      entity_id: timer.button_double_press_timer
+                    data:
+                      duration: "{{ double_press_time }}"
+              - if:
+                  condition: template
+                  value_template: "{{ states('var.button_press_count') | int == 2 }}"
+                then:
+                  - service: timer.start
+                    target:
+                      entity_id: timer.button_triple_press_timer
+                    data:
+                      duration: "{{ triple_press_time }}"
+      
+      # Long press timer finished
+      - conditions:
+          - condition: trigger
+            id: long_press_timer
+        sequence:
+          - service: var.set
+            data:
+              entity_id: var.long_press_active
+              value: "true"
+          - service: var.set
+            data:
+              entity_id: var.dimming_direction
+              value: "{{ 'down' if states('var.dimming_direction') == 'up' else 'up' }}"
+          
+          # Get entities from last controlled lights and adjust brightness
+          - variables:
+              last_controlled_type: "{{ states(!input last_controlled_lights_var) }}"
+              last_controlled_entities: "{{ state_attr(!input last_controlled_lights_var, 'entities') | from_json if state_attr(!input last_controlled_lights_var, 'entities') else '[]' }}"
+              brightness_step: "{{ !input dimming_step if states('var.dimming_direction') == 'up' else -(!input dimming_step) }}"
+          
+          # Apply dimming to the last controlled lights if available
+          - if:
+              condition: template
+              value_template: "{{ last_controlled_entities != '[]' and last_controlled_entities|length > 0 }}"
+            then:
+              - service: light.turn_on
+                target:
+                  entity_id: "{{ last_controlled_entities }}"
+                data:
+                  brightness_step: "{{ brightness_step }}"
+      
+      # Double press timer finished
+      - conditions:
+          - condition: trigger
+            id: double_press_timer
+        sequence:
+          - if:
+              condition: template
+              value_template: "{{ states('var.button_press_count') | int == 1 }}"
+            then:
+              # Single press action - toggle lights and store for dimming
+              - service: light.toggle
+                target: !input single_press_lights
+              - service: var.set
+                data:
+                  entity_id: !input last_controlled_lights_var
+                  value: "single_press"
+                  attributes:
+                    entities: "{{ expand('!input single_press_lights') | map(attribute='entity_id') | list | tojson }}"
+          - service: var.set
+            data:
+              entity_id: var.button_press_count
+              value: 0
+              attributes:
+                last_press_time: ""
+      
+      # Triple press timer finished
+      - conditions:
+          - condition: trigger
+            id: triple_press_timer
+        sequence:
+          - if:
+              condition: template
+              value_template: "{{ states('var.button_press_count') | int == 2 }}"
+            then:
+              # Double press action - toggle lights and store for dimming
+              - service: light.toggle
+                target: !input double_press_lights
+              - service: var.set
+                data:
+                  entity_id: !input last_controlled_lights_var
+                  value: "double_press"
+                  attributes:
+                    entities: "{{ expand('!input double_press_lights') | map(attribute='entity_id') | list | tojson }}"
+            else:
+              - if:
+                  condition: template
+                  value_template: "{{ states('var.button_press_count') | int == 3 }}"
+                then:
+                  # Triple press action - turn on all lights and store for dimming
+                  - service: light.turn_on
+                    target: !input triple_press_all_lights
+                  - service: var.set
+                    data:
+                      entity_id: !input last_controlled_lights_var
+                      value: "triple_press"
+                      attributes:
+                        entities: "{{ expand('!input triple_press_all_lights') | map(attribute='entity_id') | list | tojson }}"
+          - service: var.set
+            data:
+              entity_id: var.button_press_count
+              value: 0
+              attributes:
+                last_press_time: ""
+
+mode: restart
