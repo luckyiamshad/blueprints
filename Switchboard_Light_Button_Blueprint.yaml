@@ -2,9 +2,6 @@ blueprint:
   name: "Switchboard Multi-Function Button Control"
   description: "Control multiple lights with different button press patterns and long press for dimming the most recently used lights"
   domain: automation
-  source_url: https://github.com/luckyiamshad/
-  homeassistant:
-    min_version: 2025.4.0
   input:
     button_entity:
       name: Button Entity
